@@ -1,0 +1,21 @@
+# Rsync ignore file - mirrors .gitignore
+# Used for syncing source code to M2 Mac
+
+venv/
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.app
+*.dmg
+.camera_mapping.json
+*.spec.bak
+.git/
+
+# Include these scripts for M2 Mac
+!run_on_m2.sh
+!build_on_m2.sh
+

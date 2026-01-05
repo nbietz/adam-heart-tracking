@@ -1,0 +1,17 @@
+.venv/
+venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+*.pyc
+__pycache__/
+
+# macOS
+.DS_Store
+*.app
+*.dmg
+
+# Camera mapping cache
+.camera_mapping.json
