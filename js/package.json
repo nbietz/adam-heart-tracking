@@ -1,0 +1,80 @@
+{
+  "name": "health-checkin-mirror",
+  "version": "1.0.0",
+  "description": "Health Check-in Mirror System - JavaScript/Electron version",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc && webpack --mode production && npm run copy-assets",
+    "copy-assets": "mkdir -p dist/assets && cp -r assets/* dist/assets/",
+    "dev": "concurrently -k \"tsc -w\" \"webpack serve --mode development --port 8080\" \"wait-on http://localhost:8080 && electron .\"",
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "build:start": "npm run build && npm start",
+    "package": "electron-builder",
+    "package:mac": "electron-builder --mac"
+  },
+  "keywords": [
+    "electron",
+    "react",
+    "typescript",
+    "mediapipe",
+    "three.js"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26",
+    "@fortawesome/fontawesome-free": "^7.1.0",
+    "@mediapipe/camera_utils": "^0.3.1640029074",
+    "@mediapipe/drawing_utils": "^0.3.1620248257",
+    "@mediapipe/pose": "^0.5.1675463144",
+    "gl-matrix": "^3.4.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@types/three": "^0.160.0",
+    "concurrently": "^8.2.2",
+    "css-loader": "^6.9.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "html-webpack-plugin": "^5.6.0",
+    "style-loader": "^3.3.3",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "wait-on": "^9.0.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^4.15.1"
+  },
+  "build": {
+    "appId": "com.healthcheckin.mirror",
+    "productName": "Health Check-in Mirror",
+    "mac": {
+      "category": "public.app-category.healthcare-fitness",
+      "target": [
+        {
+          "target": "default",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "NSCameraUsageDescription": "This app needs camera access for the health check-in mirror system to track your pose and display the heart overlay.",
+        "NSBluetoothAlwaysUsageDescription": "This app needs Bluetooth access to connect to Polar H10 heart rate monitor.",
+        "NSMicrophoneUsageDescription": "This app may need microphone access for video features."
+      }
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ]
+  }
+}
