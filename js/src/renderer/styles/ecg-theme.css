@@ -1,0 +1,120 @@
+/**
+ * Hospital ECG Monitor Theme
+ * Glowing bright green with futuristic styling
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+
+:root {
+  --ecg-green: #00ff41;
+  --ecg-green-glow: rgba(0, 255, 65, 0.8);
+  --ecg-green-dark: #00cc33;
+  --ecg-bg-dark: rgba(0, 0, 0, 0.95);
+  --ecg-border: rgba(0, 255, 65, 0.5);
+}
+
+* {
+  font-family: 'Orbitron', 'Courier New', monospace;
+}
+
+.ecg-text {
+  color: var(--ecg-green);
+  text-shadow: 
+    0 0 10px var(--ecg-green-glow),
+    0 0 20px var(--ecg-green-glow),
+    0 0 30px var(--ecg-green-glow);
+}
+
+.ecg-label {
+  color: var(--ecg-green);
+  text-shadow: 0 0 5px var(--ecg-green-glow);
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.ecg-button {
+  background: var(--ecg-bg-dark);
+  color: var(--ecg-green);
+  border: 2px solid var(--ecg-green);
+  padding: 10px 20px;
+  font-family: 'Orbitron', 'Courier New', monospace;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 
+    0 0 10px rgba(0, 255, 65, 0.3),
+    inset 0 0 10px rgba(0, 255, 65, 0.1);
+  text-shadow: 0 0 5px var(--ecg-green-glow);
+}
+
+.ecg-button:hover {
+  background: rgba(0, 255, 65, 0.1);
+  box-shadow: 
+    0 0 20px rgba(0, 255, 65, 0.6),
+    inset 0 0 15px rgba(0, 255, 65, 0.2);
+  transform: translateY(-1px);
+}
+
+.ecg-button:active {
+  background: rgba(0, 255, 65, 0.2);
+  box-shadow: 
+    0 0 15px rgba(0, 255, 65, 0.8),
+    inset 0 0 20px rgba(0, 255, 65, 0.3);
+  transform: translateY(0);
+}
+
+.ecg-button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.ecg-select {
+  background: var(--ecg-bg-dark);
+  color: var(--ecg-green);
+  border: 2px solid var(--ecg-green);
+  padding: 8px 12px;
+  font-family: 'Orbitron', 'Courier New', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: 
+    0 0 10px rgba(0, 255, 65, 0.3),
+    inset 0 0 10px rgba(0, 255, 65, 0.1);
+  text-shadow: 0 0 5px var(--ecg-green-glow);
+}
+
+.ecg-select:focus {
+  outline: none;
+  box-shadow: 
+    0 0 20px rgba(0, 255, 65, 0.6),
+    inset 0 0 15px rgba(0, 255, 65, 0.2);
+}
+
+.ecg-panel {
+  background: var(--ecg-bg-dark);
+  border: 2px solid var(--ecg-green);
+  box-shadow: 
+    0 0 20px rgba(0, 255, 65, 0.5),
+    inset 0 0 20px rgba(0, 255, 65, 0.1);
+}
+
+.ecg-value {
+  color: var(--ecg-green);
+  text-shadow: 
+    0 0 10px var(--ecg-green-glow),
+    0 0 20px var(--ecg-green-glow),
+    0 0 30px var(--ecg-green-glow);
+  font-weight: 900;
+}
+
+.ecg-status {
+  color: var(--ecg-green);
+  text-shadow: 0 0 5px var(--ecg-green-glow);
+  font-weight: 700;
+}
+
