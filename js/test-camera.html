@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head><title>Camera Test</title></head>
+<body>
+<h1>Camera Test</h1>
+<button onclick="testCamera()">Test Camera Access</button>
+<div id="output"></div>
+<script>
+async function testCamera() {
+  const output = document.getElementById('output');
+  output.innerHTML = 'Testing...<br>';
+  
+  try {
+    // Check if API exists
+    output.innerHTML += 'navigator.mediaDevices: ' + (navigator.mediaDevices ? 'EXISTS' : 'MISSING') + '<br>';
+    
+    if (!navigator.mediaDevices) {
+      output.innerHTML += 'ERROR: navigator.mediaDevices not available<br>';
+      return;
+    }
+    
+    // Request permission
+    output.innerHTML += 'Requesting permission...<br>';
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    output.innerHTML += 'Permission granted!<br>';
+    
+    // Stop stream
+    stream.getTracks().forEach(t => t.stop());
+    
+    // Enumerate
+    output.innerHTML += 'Enumerating devices...<br>';
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    output.innerHTML += 'Total devices: ' + devices.length + '<br>';
+    
+    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+    output.innerHTML += 'Video devices: ' + videoDevices.length + '<br>';
+    
+    videoDevices.forEach((d, i) => {
+      output.innerHTML += `Device ${i}: ${d.label || '(no label)'} (${d.deviceId.substring(0, 20)})<br>`;
+    });
+    
+  } catch (err) {
+    output.innerHTML += 'ERROR: ' + err.name + ' - ' + err.message + '<br>';
+  }
+}
+</script>
+</body>
+</html>
