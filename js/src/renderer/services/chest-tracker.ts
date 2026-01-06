@@ -38,7 +38,10 @@ export class ChestTracker {
   private lastPosition2d: vec3 | null = null;
   private smoothingFactor: number;
 
-  constructor(smoothingFactor: number = 0.7) {
+  constructor(smoothingFactor: number = 0.3) {
+    // Reduced from 0.7 to 0.3 for more responsive tracking
+    // 0.3 = 30% old, 70% new - much more responsive to movements
+    // This helps with X-plane tracking lag
     this.smoothingFactor = smoothingFactor;
   }
 
@@ -185,7 +188,8 @@ export class ChestTracker {
   getChestPosition2d(
     normalizedLandmarks: NormalizedLandmark[],
     frameWidth: number,
-    frameHeight: number
+    frameHeight: number,
+    mirrorHorizontal: boolean = true
   ): vec3 | null {
     if (!normalizedLandmarks || normalizedLandmarks.length === 0) {
       return null;
@@ -207,6 +211,12 @@ export class ChestTracker {
     vec3.scale(chestCenterNormalized, sum, 0.5);
 
     // Convert to screen coordinates
+    // In Python: frame is flipped BEFORE MediaPipe processes it, so MediaPipe
+    // processes the flipped frame and returns landmarks in flipped coordinates.
+    // In JavaScript: when we use canvas transformations (ctx.scale(-1, 1)),
+    // the ImageData from getImageData() contains the pixels as drawn (mirrored).
+    // So MediaPipe processes the mirrored ImageData and returns landmarks in
+    // mirrored coordinates, matching the Python behavior. No coordinate flipping needed.
     let chestX = chestCenterNormalized[0] * frameWidth;
     let chestY = chestCenterNormalized[1] * frameHeight;
 
@@ -225,22 +235,26 @@ export class ChestTracker {
       chestY = chestY + (shoulderWidth * 0.3);
     }
 
-    // Move slightly to the left (person's right side - where heart is)
-    // The heart is slightly left of center from the person's perspective
+    // Move slightly to the left (from person's perspective)
+    // The heart is on the left side of the chest (person's left)
+    // Since the frame is mirrored, person's left appears on screen left
+    // So we move left (decrease x) to position on person's left side
     const shoulderDiff = vec3.create();
     vec3.subtract(shoulderDiff, rightShoulder2d, leftShoulder2d);
     const shoulderWidth = Math.abs(shoulderDiff[0] * frameWidth);
-    // Use negative offset to move left (person's right side) - heart is on left side of chest
-    chestX = chestX - (shoulderWidth * 0.1);
+    chestX = chestX - (shoulderWidth * 0.15);  // Move left by 15% of shoulder width
 
-    // Apply smoothing
+    // Apply minimal smoothing on both X and Y for direct tracking
     let chestPos2d = vec3.fromValues(chestX, chestY, 0);
     if (this.lastPosition2d) {
       const smoothed = vec3.create();
-      vec3.scale(smoothed, this.lastPosition2d, this.smoothingFactor);
-      const newPosScaled = vec3.create();
-      vec3.scale(newPosScaled, chestPos2d, 1.0 - this.smoothingFactor);
-      vec3.add(smoothed, smoothed, newPosScaled);
+      const smoothingFactor = 0.1; // Minimal smoothing for both X and Y - direct tracking
+      
+      // Smooth both coordinates with minimal lag
+      smoothed[0] = this.lastPosition2d[0] * smoothingFactor + chestX * (1.0 - smoothingFactor);
+      smoothed[1] = this.lastPosition2d[1] * smoothingFactor + chestY * (1.0 - smoothingFactor);
+      smoothed[2] = 0;
+      
       chestPos2d = smoothed;
     }
 
