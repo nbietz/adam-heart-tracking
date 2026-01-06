@@ -12,8 +12,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   bleStartScanning: () => ipcRenderer.invoke('ble:startScanning'),
   bleStopScanning: () => ipcRenderer.invoke('ble:stopScanning'),
   bleConnect: (address: string) => ipcRenderer.invoke('ble:connect', address),
-  bleDisconnect: () => ipcRenderer.invoke('ble:disconnect'),
+  bleDisconnect: (address?: string) => ipcRenderer.invoke('ble:disconnect', address),
   bleGetConnected: () => ipcRenderer.invoke('ble:getConnected'),
+  bleGetConnectedDevices: () => ipcRenderer.invoke('ble:getConnectedDevices'),
   
   // BLE event listeners
   onBLEDeviceDiscovered: (callback: (device: any) => void) => {
@@ -22,11 +23,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onBLEConnected: (callback: (address: string, deviceName?: string) => void) => {
     ipcRenderer.on('ble:connected', (_event, address, deviceName) => callback(address, deviceName));
   },
-  onBLEDisconnected: (callback: () => void) => {
-    ipcRenderer.on('ble:disconnected', () => callback());
+  onBLEDisconnected: (callback: (address?: string) => void) => {
+    ipcRenderer.on('ble:disconnected', (_event, address) => callback(address));
   },
-  onBLEHeartRate: (callback: (heartRate: number) => void) => {
-    ipcRenderer.on('ble:heartRate', (_event, heartRate) => callback(heartRate));
+  onBLEHeartRate: (callback: (heartRate: number, address?: string) => void) => {
+    ipcRenderer.on('ble:heartRate', (_event, heartRate, address) => callback(heartRate, address));
   },
   onBLEError: (callback: (error: Error) => void) => {
     ipcRenderer.on('ble:error', (_event, error) => callback(error));

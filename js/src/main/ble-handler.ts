@@ -17,12 +17,15 @@ export interface BLEDevice {
   address: string;
 }
 
+interface BLEConnection {
+  peripheral: any;
+  characteristic: any;
+  deviceName: string;
+  isConnected: boolean;
+}
+
 export class BLEHandler extends EventEmitter {
-  private peripheral: any = null;
-  private characteristic: any = null;
-  private isConnected: boolean = false;
-  private deviceAddress: string | null = null;
-  private deviceName: string | null = null;
+  private connections: Map<string, BLEConnection> = new Map(); // address -> connection
   private isScanning: boolean = false;
   private continuousScanInterval: NodeJS.Timeout | null = null;
   private nobleState: string = 'unknown';
@@ -194,12 +197,26 @@ export class BLEHandler extends EventEmitter {
 
   /**
    * Connect to a Polar H10 device.
+   * Supports multiple simultaneous connections.
    */
   async connect(address: string): Promise<boolean> {
+    // Normalize address for comparison (case-insensitive) - declare outside try/catch for error handling
+    const normalizedAddress = address.toLowerCase().trim();
+    
     try {
       // Validate address
       if (!address || address.trim() === '') {
         throw new Error('Device address is empty');
+      }
+      
+      // Check if already connected (using normalized address)
+      for (const [connAddress, conn] of this.connections.entries()) {
+        if (connAddress.toLowerCase().trim() === normalizedAddress && conn.isConnected) {
+          console.log(`[BLE] Device ${address} already connected`);
+          // Still emit connected event to ensure UI is updated
+          this.emit('connected', address, conn.deviceName);
+          return true;
+        }
       }
       
       console.log(`[BLE] Attempting to connect to device: ${address}`);
@@ -215,8 +232,6 @@ export class BLEHandler extends EventEmitter {
       // Find peripheral - try scanning if not already found
       let peripheral: any = null;
       
-      // First, try to find in already discovered peripherals (if we have a way to cache them)
-      // For now, we'll scan for it
       console.log(`[BLE] Scanning for device ${address}...`);
       
       peripheral = await new Promise<any>((resolve, reject) => {
@@ -228,7 +243,10 @@ export class BLEHandler extends EventEmitter {
 
         const onDiscover = (p: any) => {
           const pAddress = p.address || p.id || '';
-          if (pAddress && (pAddress === address || pAddress.toLowerCase() === address.toLowerCase())) {
+          // Normalize both addresses for comparison
+          const normalizedPAddress = pAddress.toLowerCase().trim();
+          const normalizedTargetAddress = address.toLowerCase().trim();
+          if (pAddress && normalizedPAddress === normalizedTargetAddress) {
             console.log(`[BLE] Found target device: ${p.advertisement.localName || 'Unknown'} (${pAddress})`);
             clearTimeout(timeout);
             noble.removeListener('discover', onDiscover);
@@ -262,11 +280,8 @@ export class BLEHandler extends EventEmitter {
         }
       }
 
-      this.peripheral = peripheral;
-      this.deviceAddress = address;
       // Get device name from discovered devices or use advertisement name
-      this.deviceName = this.discoveredDevices.get(address) || peripheral.advertisement.localName || 'Polar H10';
-      this.isConnected = true;
+      const deviceName = this.discoveredDevices.get(address) || peripheral.advertisement.localName || 'Polar H10';
 
       // Discover services and characteristics
       console.log('[BLE] Discovering services...');
@@ -305,17 +320,26 @@ export class BLEHandler extends EventEmitter {
         characteristics.push(hrChar);
       }
 
-      this.characteristic = characteristics[0];
+      const characteristic = characteristics[0];
       console.log('[BLE] Subscribing to heart rate notifications...');
 
-      // Subscribe to notifications
-      await this.characteristic.subscribeAsync();
-      this.characteristic.on('data', (data: Buffer) => {
-        this.handleHeartRateData(data);
+      // Subscribe to notifications with device address context
+      await characteristic.subscribeAsync();
+      characteristic.on('data', (data: Buffer) => {
+        this.handleHeartRateData(data, address);
       });
 
-      console.log('[BLE] Successfully connected and subscribed to heart rate data');
-      this.emit('connected', address, this.deviceName);
+      // Store connection (use normalized address as key - reuse variable from top of function)
+      const connection: BLEConnection = {
+        peripheral,
+        characteristic,
+        deviceName,
+        isConnected: true
+      };
+      this.connections.set(normalizedAddress, connection);
+
+      console.log(`[BLE] Successfully connected to ${deviceName} (${address}) and subscribed to heart rate data`);
+      this.emit('connected', address, deviceName);
       
       // Restart continuous scanning if it was active
       if (wasScanning) {
@@ -324,18 +348,26 @@ export class BLEHandler extends EventEmitter {
       
       return true;
     } catch (error: any) {
-      console.error('[BLE] Error connecting to device:', error);
+      console.error(`[BLE] Error connecting to device ${address}:`, error);
       this.emit('error', error);
-      this.isConnected = false;
-      this.deviceAddress = null;
+      // Remove failed connection if it exists (using normalized address from top of function)
+      if (this.connections.has(normalizedAddress)) {
+        this.connections.delete(normalizedAddress);
+      }
+      // Also try original address format
+      if (this.connections.has(address)) {
+        this.connections.delete(address);
+      }
       return false;
     }
   }
 
   /**
    * Handle heart rate data notification.
+   * @param data - Heart rate data buffer
+   * @param deviceAddress - Device address that sent the data
    */
-  private handleHeartRateData(data: Buffer): void {
+  private handleHeartRateData(data: Buffer, deviceAddress: string): void {
     try {
       if (data.length < 2) {
         console.warn('[BLE] Heart rate data too short:', data.length);
@@ -356,65 +388,121 @@ export class BLEHandler extends EventEmitter {
 
       // Only log occasionally to avoid spam
       if (Math.random() < 0.01) { // Log ~1% of heart rate updates
-        console.log(`[BLE] Heart rate: ${heartRate} BPM`);
+        console.log(`[BLE] Heart rate from ${deviceAddress}: ${heartRate} BPM`);
       }
-      this.emit('heartRate', heartRate);
+      // Emit with device address identifier
+      this.emit('heartRate', heartRate, deviceAddress);
     } catch (error) {
       console.error('[BLE] Error parsing heart rate data:', error);
     }
   }
 
   /**
-   * Disconnect from device.
+   * Disconnect from a specific device or all devices.
+   * @param address - Device address to disconnect. If not provided, disconnects all devices.
    */
-  async disconnect(): Promise<void> {
-    console.log('[BLE] Disconnecting...');
-    
-    if (this.characteristic) {
-      try {
-        await this.characteristic.unsubscribeAsync();
-        console.log('[BLE] Unsubscribed from characteristic');
-      } catch (error) {
-        console.warn('[BLE] Error unsubscribing:', error);
+  async disconnect(address?: string): Promise<void> {
+    if (address) {
+      // Normalize address for lookup
+      const normalizedAddress = address.toLowerCase().trim();
+      
+      // Find connection by normalized address
+      let connection: BLEConnection | undefined;
+      let actualAddress: string | undefined;
+      for (const [connAddress, conn] of this.connections.entries()) {
+        if (connAddress.toLowerCase().trim() === normalizedAddress) {
+          connection = conn;
+          actualAddress = connAddress;
+          break;
+        }
       }
-      this.characteristic = null;
-    }
-
-    if (this.peripheral) {
-      try {
-        await this.peripheral.disconnectAsync();
-        console.log('[BLE] Disconnected from peripheral');
-      } catch (error) {
-        console.warn('[BLE] Error disconnecting:', error);
+      
+      if (!connection || !actualAddress) {
+        console.log(`[BLE] Device ${address} not connected`);
+        return;
       }
-      this.peripheral = null;
-    }
 
-    this.isConnected = false;
-    this.deviceAddress = null;
-    this.deviceName = null;
-    this.emit('disconnected');
+      console.log(`[BLE] Disconnecting device ${address}...`);
+      
+      if (connection.characteristic) {
+        try {
+          await connection.characteristic.unsubscribeAsync();
+          console.log(`[BLE] Unsubscribed from characteristic for ${address}`);
+        } catch (error) {
+          console.warn(`[BLE] Error unsubscribing from ${address}:`, error);
+        }
+      }
+
+      if (connection.peripheral) {
+        try {
+          await connection.peripheral.disconnectAsync();
+          console.log(`[BLE] Disconnected from peripheral ${address}`);
+        } catch (error) {
+          console.warn(`[BLE] Error disconnecting ${address}:`, error);
+        }
+      }
+
+      this.connections.delete(actualAddress);
+      this.emit('disconnected', address);
+    } else {
+      // Disconnect all devices
+      console.log('[BLE] Disconnecting all devices...');
+      const addresses = Array.from(this.connections.keys());
+      for (const addr of addresses) {
+        await this.disconnect(addr);
+      }
+    }
   }
 
   /**
    * Get device name by address.
    */
   getDeviceName(address: string): string | null {
-    return this.discoveredDevices.get(address) || null;
+    // Normalize address for lookup
+    const normalizedAddress = address.toLowerCase().trim();
+    
+    // First check connected devices
+    for (const [connAddress, connection] of this.connections.entries()) {
+      if (connAddress.toLowerCase().trim() === normalizedAddress) {
+        return connection.deviceName;
+      }
+    }
+    // Then check discovered devices
+    return this.discoveredDevices.get(normalizedAddress) || this.discoveredDevices.get(address) || null;
   }
 
   /**
-   * Check if connected.
+   * Check if a specific device is connected.
+   */
+  isDeviceConnected(address: string): boolean {
+    const normalizedAddress = address.toLowerCase().trim();
+    for (const [connAddress, connection] of this.connections.entries()) {
+      if (connAddress.toLowerCase().trim() === normalizedAddress) {
+        return connection.isConnected || false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Check if any device is connected.
    */
   getConnected(): boolean {
-    return this.isConnected;
+    return this.connections.size > 0 && Array.from(this.connections.values()).some(c => c.isConnected);
   }
 
   /**
-   * Get current device address.
+   * Get all connected device addresses.
    */
-  getDeviceAddress(): string | null {
-    return this.deviceAddress;
+  getConnectedDevices(): string[] {
+    return Array.from(this.connections.keys()).filter(addr => this.isDeviceConnected(addr));
+  }
+
+  /**
+   * Get connection info for a device.
+   */
+  getConnection(address: string): BLEConnection | null {
+    return this.connections.get(address) || null;
   }
 }
 

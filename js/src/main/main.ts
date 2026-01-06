@@ -152,12 +152,14 @@ function initBLE(): void {
     mainWindow?.webContents.send('ble:connected', address, deviceName);
   });
 
-  bleHandler.on('disconnected', () => {
-    mainWindow?.webContents.send('ble:disconnected');
+  bleHandler.on('disconnected', (address?: string) => {
+    // Forward disconnect event with optional address
+    mainWindow?.webContents.send('ble:disconnected', address);
   });
 
-  bleHandler.on('heartRate', (heartRate: number) => {
-    mainWindow?.webContents.send('ble:heartRate', heartRate);
+  bleHandler.on('heartRate', (heartRate: number, address: string) => {
+    // Forward heart rate with device address
+    mainWindow?.webContents.send('ble:heartRate', heartRate, address);
   });
 
   bleHandler.on('error', (error: Error) => {
@@ -185,9 +187,9 @@ function initBLE(): void {
     return false;
   });
 
-  ipcMain.handle('ble:disconnect', async () => {
+  ipcMain.handle('ble:disconnect', async (_event, address?: string) => {
     if (bleHandler) {
-      await bleHandler.disconnect();
+      await bleHandler.disconnect(address);
     }
   });
 
@@ -196,6 +198,13 @@ function initBLE(): void {
       return bleHandler.getConnected();
     }
     return false;
+  });
+
+  ipcMain.handle('ble:getConnectedDevices', () => {
+    if (bleHandler) {
+      return bleHandler.getConnectedDevices();
+    }
+    return [];
   });
 }
 
