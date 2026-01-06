@@ -8,13 +8,17 @@ import '../styles/ecg-theme.css';
 interface HeartRateDisplayProps {
   heartRate: number | null;
   isConnected: boolean;
-  deviceName: string | null;
+  deviceName?: string | null;
+  color?: string; // User-specific color
+  positionOffset?: number; // Offset for multiple displays (0, 1, 2, ...)
 }
 
 export const HeartRateDisplay: React.FC<HeartRateDisplayProps> = ({
   heartRate,
   isConnected,
-  deviceName
+  deviceName,
+  color = '#00ff41', // Default ECG green
+  positionOffset = 0
 }) => {
   const [heartScale, setHeartScale] = useState(1.0);
   const startTimeRef = useRef<number>(Date.now());
@@ -86,27 +90,41 @@ export const HeartRateDisplay: React.FC<HeartRateDisplayProps> = ({
     return null;
   }
 
+  // Convert hex color to rgba for glow effect
+  const hexToRgba = (hex: string, alpha: number): string => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  };
+
+  const glowColor = hexToRgba(color, 0.8);
+  
+  // Position offset: stack displays vertically with spacing
+  const topOffset = 20 + (positionOffset * 180); // 180px spacing between displays
+
   return (
     <div
       className="ecg-panel"
       style={{
         position: 'absolute',
-        top: 20,
+        top: topOffset,
         right: 20,
         padding: '15px 20px',
         borderRadius: '5px',
         zIndex: 100,
         minWidth: '220px',
-        width: '220px'
+        width: '220px',
+        borderColor: color
       }}
     >
       {deviceName && isConnected && (
-        <div className="ecg-label" style={{ fontSize: '10px', marginBottom: '10px', opacity: 0.8 }}>
+        <div className="ecg-label" style={{ fontSize: '10px', marginBottom: '10px', opacity: 0.8, color }}>
           {deviceName}
         </div>
       )}
       {heartRate !== null ? (
-        <div className="ecg-value" style={{ fontSize: '64px', fontWeight: 900, display: 'flex', alignItems: 'center', lineHeight: 1, position: 'relative', paddingRight: '60px' }}>
+        <div className="ecg-value" style={{ fontSize: '64px', fontWeight: 900, display: 'flex', alignItems: 'center', lineHeight: 1, position: 'relative', paddingRight: '60px', color }}>
           <span>{heartRate}</span>
           <span
             style={{
@@ -116,7 +134,7 @@ export const HeartRateDisplay: React.FC<HeartRateDisplayProps> = ({
               right: '0px',
               transform: `scale(${heartScale})`,
               transition: 'transform 0.1s ease-out',
-              filter: 'drop-shadow(0 0 10px rgba(0, 255, 65, 0.8))',
+              filter: `drop-shadow(0 0 10px ${glowColor})`,
               transformOrigin: 'center center',
               width: '48px',
               textAlign: 'center'

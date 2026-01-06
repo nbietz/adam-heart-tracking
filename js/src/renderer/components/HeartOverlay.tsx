@@ -12,6 +12,7 @@ interface HeartOverlayProps {
   height: number;
   cameraFrameWidth?: number;
   cameraFrameHeight?: number;
+  color?: string; // User-specific color
 }
 
 export const HeartOverlay: React.FC<HeartOverlayProps> = ({
@@ -20,7 +21,8 @@ export const HeartOverlay: React.FC<HeartOverlayProps> = ({
   width,
   height,
   cameraFrameWidth,
-  cameraFrameHeight
+  cameraFrameHeight,
+  color = '#00ff41' // Default ECG green
 }) => {
   if (!chestPosition2d) {
     return null;
@@ -29,11 +31,33 @@ export const HeartOverlay: React.FC<HeartOverlayProps> = ({
   let { x, y } = chestPosition2d;
   
   // Scale position from camera frame coordinates to overlay canvas coordinates
+  // Account for object-fit: cover scaling which may crop the video
   if (cameraFrameWidth && cameraFrameHeight && cameraFrameWidth > 0 && cameraFrameHeight > 0) {
-    const scaleX = width / cameraFrameWidth;
-    const scaleY = height / cameraFrameHeight;
-    x = x * scaleX;
-    y = y * scaleY;
+    // Calculate aspect ratios
+    const videoAspect = cameraFrameWidth / cameraFrameHeight;
+    const viewportAspect = width / height;
+    
+    let scale: number;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    if (videoAspect > viewportAspect) {
+      // Video is wider than viewport - cropped on left/right (letterboxing)
+      // Scale based on height, video fills height
+      scale = height / cameraFrameHeight;
+      const scaledWidth = cameraFrameWidth * scale;
+      offsetX = (scaledWidth - width) / 2; // Center the cropped video
+    } else {
+      // Video is taller than viewport - cropped on top/bottom (pillarboxing)
+      // Scale based on width, video fills width
+      scale = width / cameraFrameWidth;
+      const scaledHeight = cameraFrameHeight * scale;
+      offsetY = (scaledHeight - height) / 2; // Center the cropped video
+    }
+    
+    // Scale coordinates and account for cropping offset
+    x = x * scale - offsetX;
+    y = y * scale - offsetY;
   }
   
   // Validate coordinates are within bounds
@@ -46,6 +70,18 @@ export const HeartOverlay: React.FC<HeartOverlayProps> = ({
   const baseSize = 80; // Base font size in pixels
   const animatedSize = baseSize * (1.0 + beatScale * 0.2);
   
+  // Convert hex color to rgba for glow effect
+  const hexToRgba = (hex: string, alpha: number): string => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  };
+  
+  const glowColor1 = hexToRgba(color, 0.8);
+  const glowColor2 = hexToRgba(color, 0.6);
+  const glowColor3 = hexToRgba(color, 0.4);
+  
   return (
     <div
       style={{
@@ -57,7 +93,7 @@ export const HeartOverlay: React.FC<HeartOverlayProps> = ({
         pointerEvents: 'none',
         zIndex: 10,
         lineHeight: 1,
-        filter: 'drop-shadow(0 0 10px rgba(0, 255, 65, 0.8)) drop-shadow(0 0 20px rgba(0, 255, 65, 0.6)) drop-shadow(0 0 30px rgba(0, 255, 65, 0.4))'
+        filter: `drop-shadow(0 0 10px ${glowColor1}) drop-shadow(0 0 20px ${glowColor2}) drop-shadow(0 0 30px ${glowColor3})`
       }}
     >
       ❤️

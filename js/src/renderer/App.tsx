@@ -7,43 +7,63 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { CameraView } from './components/CameraView';
 import { HeartOverlay } from './components/HeartOverlay';
 import { HeartRateDisplay } from './components/HeartRateDisplay';
+import { HeartRateZones } from './components/HeartRateZones';
 import { Controls } from './components/Controls';
 import { CameraService } from './services/camera-service';
 import { PoseTracker, PoseResults } from './services/pose-tracker';
-import { ChestTracker } from './services/chest-tracker';
+import { UserTracker, User } from './services/user-tracker';
 import { ANIMATION_SMOOTHING, HEART_BEAT_SCALE_AMPLITUDE } from './utils/config';
+
+// Helper function to convert ImageData to HTMLImageElement/Canvas
+function imageDataToCanvas(imageData: ImageData): Promise<HTMLCanvasElement> {
+  return new Promise((resolve) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.putImageData(imageData, 0, 0);
+    }
+    resolve(canvas);
+  });
+}
+
+// Helper function to calculate the center x-coordinate of a pose
+function calculatePoseCenterX(landmarks: any[]): number {
+  // Use shoulders (11, 12) or hips (23, 24) to calculate center
+  const leftShoulder = landmarks[11];
+  const rightShoulder = landmarks[12];
+  if (leftShoulder && rightShoulder && leftShoulder.visibility > 0.5 && rightShoulder.visibility > 0.5) {
+    return (leftShoulder.x + rightShoulder.x) / 2;
+  }
+  const leftHip = landmarks[23];
+  const rightHip = landmarks[24];
+  if (leftHip && rightHip && leftHip.visibility > 0.5 && rightHip.visibility > 0.5) {
+    return (leftHip.x + rightHip.x) / 2;
+  }
+  return landmarks[0]?.x || 0.5;  // Fallback to nose
+}
 
 const App: React.FC = () => {
   // Services
   const [cameraService, setCameraService] = useState<CameraService | null>(null);
   const [poseTracker, setPoseTracker] = useState<PoseTracker | null>(null);
-  const [chestTracker, setChestTracker] = useState<ChestTracker | null>(null);
+  const userTrackerRef = useRef<UserTracker | null>(null);
 
   // State
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [heartRate, setHeartRate] = useState<number | null>(null);
-  const [isBLEConnected, setIsBLEConnected] = useState(false);
-  const [deviceAddress, setDeviceAddress] = useState<string | null>(null);
-  const [deviceName, setDeviceName] = useState<string | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
   const [discoveredDevices, setDiscoveredDevices] = useState<Array<{ name: string; address: string }>>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [initialScanComplete, setInitialScanComplete] = useState(false);
-  const [chestPosition2d, setChestPosition2d] = useState<{ x: number; y: number } | null>(null);
-  const [beatScale, setBeatScale] = useState(0.0);
+  const [connectingDevices, setConnectingDevices] = useState<Set<string>>(new Set());
   const cameraFrameSizeRef = useRef<{ width: number; height: number } | null>(null);
 
-  // Animation state
-  const currentBPMRef = useRef<number | null>(null);
-  const targetBPMRef = useRef<number | null>(null);
-  const heartbeatPulseStartRef = useRef<number | null>(null);
+  // Animation state per user
+  const userBeatScalesRef = useRef<Map<number, number>>(new Map());
+  const userBPMRefs = useRef<Map<number, { current: number | null; target: number | null; pulseStart: number | null }>>(new Map());
   const startTimeRef = useRef<number>(Date.now());
   const pulseDuration = 0.3; // seconds
-
-  // Debug logging flags
-  const poseDetectedLoggedRef = useRef(false);
-  const chestPositionLoggedRef = useRef(false);
-  const chestPositionNullLoggedRef = useRef(false);
-  const noPoseLoggedRef = useRef(false);
 
   // Initialize services
   useEffect(() => {
@@ -54,13 +74,22 @@ const App: React.FC = () => {
     const pose = new PoseTracker();
     setPoseTracker(pose);
 
-    // Initialize chest tracker
-    const chest = new ChestTracker();
-    setChestTracker(chest);
+    // Initialize user tracker
+    const userTracker = new UserTracker();
+    userTrackerRef.current = userTracker;
+
+    // Update users state when user tracker changes
+    const updateUsers = () => {
+      setUsers(userTracker.getUsers());
+    };
+    
+    // Poll for user changes (could be improved with events)
+    const userUpdateInterval = setInterval(updateUsers, 100);
 
     return () => {
       cam.stop();
       pose.close();
+      clearInterval(userUpdateInterval);
     };
   }, []);
 
@@ -98,33 +127,115 @@ const App: React.FC = () => {
     });
 
     window.electronAPI.onBLEConnected((address: string, deviceName?: string) => {
-      setIsBLEConnected(true);
-      setDeviceAddress(address);
-      // Use provided device name or find from discovered devices
-      if (deviceName) {
-        setDeviceName(deviceName);
+      const tracker = userTrackerRef.current;
+      if (!tracker) return;
+
+      // Remove from connecting set
+      setConnectingDevices(prev => {
+        const next = new Set(prev);
+        next.delete(address);
+        return next;
+      });
+
+      // Find device name
+      const name = deviceName || discoveredDevices.find(d => d.address === address)?.name || 'Polar H10';
+      
+      // Check if device is already assigned to a user
+      const existingUser = tracker.getUserByDevice(address);
+      if (existingUser) {
+        // Device already assigned, just update name if needed
+        if (existingUser.deviceName !== name) {
+          tracker.assignDevice(existingUser.userId, address, name);
+        }
+        setUsers(tracker.getUsers());
+        return;
+      }
+      
+      // Try to find a user without a device to reassign
+      const usersWithoutDevices = tracker.getUsersWithoutDevices();
+      if (usersWithoutDevices.length > 0) {
+        // Reassign device to existing user without a device
+        const userToReassign = usersWithoutDevices[0];
+        tracker.assignDevice(userToReassign.userId, address, name);
+        console.log(`[App] Reassigned device ${name} (${address}) to existing User ${userToReassign.userId}`);
+        setUsers(tracker.getUsers());
+        return;
+      }
+      
+      // Check if we can add a new user (max 2 users)
+      const currentUsers = tracker.getUsers();
+      if (currentUsers.length >= 2) {
+        console.warn(`[App] Maximum number of users (2) reached. Cannot connect device ${name} (${address})`);
+        // Show user-friendly message
+        alert('Maximum of 2 users supported. Please disconnect a user before connecting another device.');
+        return;
+      }
+      
+      // Create a new user when a device connects
+      // User 1 = first device, User 2 = second device
+      const userId = tracker.addUser(address, name);
+      if (userId === null) {
+        console.error(`[App] Failed to create user for device ${name} (${address})`);
+        alert('Failed to create user. Maximum number of users may have been reached.');
+        return;
+      }
+      tracker.assignDevice(userId, address, name);
+      console.log(`[App] Created User ${userId} for device ${name} (${address})`);
+      setUsers(tracker.getUsers());
+    });
+
+    window.electronAPI.onBLEDisconnected((address?: string) => {
+      const tracker = userTrackerRef.current;
+      if (!tracker) return;
+
+      // Remove from connecting set if it was connecting
+      if (address) {
+        setConnectingDevices(prev => {
+          const next = new Set(prev);
+          next.delete(address);
+          return next;
+        });
+      }
+
+      if (address) {
+        // Disconnect specific device - unassign device but keep the user
+        // Only unassign if the device is still assigned (to avoid double-unassign)
+        const user = tracker.getUserByDevice(address);
+        if (user && user.deviceAddress === address) {
+          tracker.unassignDevice(user.userId);
+        }
       } else {
-        const device = discoveredDevices.find(d => d.address === address);
-        if (device) {
-          setDeviceName(device.name);
+        // Disconnect all - unassign all devices but keep users
+        const usersWithDevices = tracker.getUsersWithDevices();
+        for (const user of usersWithDevices) {
+          tracker.unassignDevice(user.userId);
         }
       }
+      setUsers(tracker.getUsers());
     });
 
-    window.electronAPI.onBLEDisconnected(() => {
-      setIsBLEConnected(false);
-      setDeviceAddress(null);
-      setDeviceName(null);
-      setHeartRate(null); // Clear heart rate on disconnect
-      setChestPosition2d(null); // Clear heart overlay on disconnect
-    });
+    window.electronAPI.onBLEHeartRate((hr: number, address?: string) => {
+      if (!hr || hr <= 0 || hr >= 300) return; // Sanity check
+      
+      const tracker = userTrackerRef.current;
+      if (!tracker || !address) return;
 
-    window.electronAPI.onBLEHeartRate((hr) => {
-      if (hr && hr > 0 && hr < 300) { // Sanity check
-        setHeartRate(hr);
-        targetBPMRef.current = hr;
-        heartbeatPulseStartRef.current = Date.now() / 1000;
+      // Update heart rate for user with this device
+      tracker.updateHeartRate(address, hr);
+      
+      // Update animation state for this user
+      const user = tracker.getUserByDevice(address);
+      if (user) {
+        let bpmState = userBPMRefs.current.get(user.userId);
+        if (!bpmState) {
+          bpmState = { current: null, target: null, pulseStart: null };
+          userBPMRefs.current.set(user.userId, bpmState);
+        }
+        bpmState.target = hr;
+        bpmState.pulseStart = Date.now() / 1000;
       }
+      
+      setUsers(tracker.getUsers());
     });
 
     window.electronAPI.onBLEError((error) => {
@@ -142,61 +253,83 @@ const App: React.FC = () => {
     };
   }, [discoveredDevices]);
 
-  // Animation loop for heartbeat
+  // Animation loop for heartbeat (per user)
   useEffect(() => {
     const animate = () => {
       const currentTime = Date.now() / 1000;
-
-      // Handle heartbeat pulse
-      if (heartbeatPulseStartRef.current !== null) {
-        const pulseElapsed = currentTime - heartbeatPulseStartRef.current;
-
-        if (pulseElapsed < pulseDuration) {
-          const progress = pulseElapsed / pulseDuration;
-          let pulse: number;
-
-          if (progress < 0.3) {
-            // Quick expansion
-            pulse = Math.sin((progress * Math.PI) / 0.3) * HEART_BEAT_SCALE_AMPLITUDE;
-          } else {
-            // Slow contraction
-            const decayProgress = (progress - 0.3) / 0.7;
-            pulse = Math.cos((decayProgress * Math.PI) / 2) * HEART_BEAT_SCALE_AMPLITUDE;
-          }
-
-          setBeatScale(pulse);
-        } else {
-          heartbeatPulseStartRef.current = null;
-        }
+      const tracker = userTrackerRef.current;
+      if (!tracker) {
+        requestAnimationFrame(animate);
+        return;
       }
 
-      // Fallback to BPM-based animation
-      if (heartbeatPulseStartRef.current === null && targetBPMRef.current !== null) {
-        // Smooth BPM transition
-        if (currentBPMRef.current === null) {
-          currentBPMRef.current = targetBPMRef.current;
-        } else {
-          const diff = targetBPMRef.current - currentBPMRef.current;
-          currentBPMRef.current += diff * ANIMATION_SMOOTHING;
+      // Update beat scales for all users
+      const currentUsers = tracker.getUsers();
+      for (const user of currentUsers) {
+        const bpmState = userBPMRefs.current.get(user.userId);
+        if (!bpmState) {
+          userBeatScalesRef.current.set(user.userId, 0.0);
+          continue;
         }
 
-        if (currentBPMRef.current > 0) {
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          const beatInterval = 60.0 / currentBPMRef.current;
-          const phase = ((elapsed % beatInterval) / beatInterval) * 2.0 * Math.PI;
+        let beatScale = 0.0;
 
-          let pulse: number;
-          if (phase < Math.PI) {
-            pulse = Math.sin(phase) * HEART_BEAT_SCALE_AMPLITUDE;
+        // Handle heartbeat pulse
+        if (bpmState.pulseStart !== null) {
+          const pulseElapsed = currentTime - bpmState.pulseStart;
+
+          if (pulseElapsed < pulseDuration) {
+            const progress = pulseElapsed / pulseDuration;
+            let pulse: number;
+
+            if (progress < 0.3) {
+              // Quick expansion
+              pulse = Math.sin((progress * Math.PI) / 0.3) * HEART_BEAT_SCALE_AMPLITUDE;
+            } else {
+              // Slow contraction
+              const decayProgress = (progress - 0.3) / 0.7;
+              pulse = Math.cos((decayProgress * Math.PI) / 2) * HEART_BEAT_SCALE_AMPLITUDE;
+            }
+
+            beatScale = pulse;
           } else {
-            pulse = Math.sin(phase) * HEART_BEAT_SCALE_AMPLITUDE * 0.5;
+            bpmState.pulseStart = null;
+          }
+        }
+
+        // Fallback to BPM-based animation
+        if (bpmState.pulseStart === null && bpmState.target !== null) {
+          // Smooth BPM transition
+          if (bpmState.current === null) {
+            bpmState.current = bpmState.target;
+          } else {
+            const diff = bpmState.target - bpmState.current;
+            bpmState.current += diff * ANIMATION_SMOOTHING;
           }
 
-          setBeatScale(pulse);
-        } else {
-          setBeatScale(0.0);
+          if (bpmState.current > 0) {
+            const elapsed = (Date.now() - startTimeRef.current) / 1000;
+            const beatInterval = 60.0 / bpmState.current;
+            const phase = ((elapsed % beatInterval) / beatInterval) * 2.0 * Math.PI;
+
+            let pulse: number;
+            if (phase < Math.PI) {
+              pulse = Math.sin(phase) * HEART_BEAT_SCALE_AMPLITUDE;
+            } else {
+              pulse = Math.sin(phase) * HEART_BEAT_SCALE_AMPLITUDE * 0.5;
+            }
+
+            beatScale = pulse;
+          } else {
+            beatScale = 0.0;
+          }
         }
+
+        userBeatScalesRef.current.set(user.userId, beatScale);
       }
+
+      // Trigger re-render by updating users (which will cause components to re-render)
+      setUsers([...currentUsers]);
 
       requestAnimationFrame(animate);
     };
@@ -208,61 +341,137 @@ const App: React.FC = () => {
   // Handle frame processing - non-blocking
   const handleFrameReady = useCallback(async (imageData: ImageData | null) => {
     if (!isCameraActive) {
-      // Clear heart overlay when camera is inactive
-      setChestPosition2d(null);
+      // Mark all users as invisible when camera is inactive
+      const tracker = userTrackerRef.current;
+      if (tracker) {
+        for (const user of tracker.getUsers()) {
+          tracker.updateChestPosition(user.userId, null);
+        }
+        setUsers(tracker.getUsers());
+      }
       return;
     }
     
-    if (!imageData || !poseTracker || !chestTracker) {
+    if (!imageData || !poseTracker) {
       return;
     }
 
+    const tracker = userTrackerRef.current;
+    if (!tracker) return;
+
     try {
-      // Process pose (this is async but we don't block on it)
-      const results: PoseResults = await poseTracker.process(imageData);
+      // Store camera frame size for scaling
+      cameraFrameSizeRef.current = { width: imageData.width, height: imageData.height };
 
-      // Check if we have pose landmarks
-      const hasLandmarks = results.poseLandmarks && 
-                          Array.isArray(results.poseLandmarks) && 
-                          results.poseLandmarks.length > 0;
-
-      if (hasLandmarks) {
-        // Track chest position in 2D screen coordinates
-        const chestPos2d = chestTracker.getChestPosition2d(
-          results.poseLandmarks as any,
-          imageData.width,
-          imageData.height
-        );
-
-        if (chestPos2d) {
-          // Store camera frame size for scaling
-          cameraFrameSizeRef.current = { width: imageData.width, height: imageData.height };
-          setChestPosition2d({ x: chestPos2d[0], y: chestPos2d[1] });
-        } else {
-          setChestPosition2d(null);
-        }
-      } else {
-        setChestPosition2d(null);
+      const usersWithDevices = tracker.getUsersWithDevices();
+      
+      if (usersWithDevices.length === 0) {
+        // No users with devices - don't track poses
+        return;
       }
+
+      // Process frame - PoseLandmarker returns array of poses (multi-person support)
+      const results: PoseResults = await poseTracker.process(imageData, Date.now());
+      
+      // Log person count
+      const personCount = results.poseLandmarks?.length || 0;
+      console.log(`[App] Detected ${personCount} person(s) in frame`);
+      
+      const detectedPoses: Array<{ user: User; chestPos2d: { x: number; y: number } }> = [];
+
+      if (personCount === 0) {
+        // No poses detected - mark all users as invisible
+        for (const user of usersWithDevices) {
+          tracker.updateChestPosition(user.userId, null);
+        }
+      } else if (personCount === 1) {
+        // One person detected - assign to first user without pose or first user
+        const pose = results.poseLandmarks![0]; // First pose (array of 33 landmarks)
+        const targetUser = usersWithDevices.find(u => !u.chestPosition2d) || usersWithDevices[0];
+        
+        const chestPos2d = targetUser.chestTracker.getChestPosition2d(
+          pose as any,
+          imageData.width,
+          imageData.height,
+          true
+        );
+        
+        if (chestPos2d) {
+          detectedPoses.push({ user: targetUser, chestPos2d: { x: chestPos2d[0], y: chestPos2d[1] } });
+        }
+      } else if (personCount >= 2) {
+        // Two or more people detected - assign to users based on x-position
+        // Sort poses by x-position (left to right)
+        const sortedPoses = results.poseLandmarks!
+          .map((pose, index) => ({
+            pose,
+            centerX: calculatePoseCenterX(pose),
+            index
+          }))
+          .sort((a, b) => a.centerX - b.centerX);  // Sort left to right
+        
+        // Assign leftmost pose to user 1, rightmost to user 2
+        // Only process poses for users that actually exist
+        for (let i = 0; i < Math.min(usersWithDevices.length, sortedPoses.length); i++) {
+          const { pose } = sortedPoses[i];
+          const targetUser = usersWithDevices[i];
+          
+          // Safety check: ensure user exists and has chestTracker
+          if (!targetUser || !targetUser.chestTracker) {
+            console.warn(`[App] User ${i} not available for pose assignment`);
+            continue;
+          }
+          
+          const chestPos2d = targetUser.chestTracker.getChestPosition2d(
+            pose as any,
+            imageData.width,
+            imageData.height,
+            true
+          );
+          
+          if (chestPos2d) {
+            detectedPoses.push({ user: targetUser, chestPos2d: { x: chestPos2d[0], y: chestPos2d[1] } });
+          }
+        }
+      }
+
+      // Update chest positions for detected poses
+      for (const detected of detectedPoses) {
+        tracker.updateChestPosition(detected.user.userId, detected.chestPos2d);
+        // #region agent log
+        // Removed frequent logging
+        // #endregion
+      }
+
+      // Mark users without detected poses as invisible (but keep them if they have devices)
+      const detectedUserIds = new Set(detectedPoses.map(p => p.user.userId));
+      for (const user of usersWithDevices) {
+        if (!detectedUserIds.has(user.userId)) {
+          tracker.updateChestPosition(user.userId, null);
+          // #region agent log
+          // Removed frequent logging - only log when state changes
+          // #endregion
+        }
+      }
+      
+      setUsers(tracker.getUsers());
     } catch (error) {
       console.error('Error processing frame:', error);
-      setChestPosition2d(null);
     }
-  }, [poseTracker, chestTracker, isCameraActive]);
+  }, [poseTracker, isCameraActive]);
 
-  // Clear heart overlay when camera is stopped
+  // Clear heart overlays when camera is stopped
   useEffect(() => {
     if (!isCameraActive) {
-      setChestPosition2d(null);
+      const tracker = userTrackerRef.current;
+      if (tracker) {
+        for (const user of tracker.getUsers()) {
+          tracker.updateChestPosition(user.userId, null);
+        }
+        setUsers(tracker.getUsers());
+      }
     }
   }, [isCameraActive]);
-
-  // Clear heart overlay when heart rate monitor is disconnected or no active pulse
-  useEffect(() => {
-    if (!isBLEConnected || heartRate === null || heartRate === 0) {
-      setChestPosition2d(null);
-    }
-  }, [isBLEConnected, heartRate]);
 
   // Get viewport dimensions
   const [viewport, setViewport] = useState({ width: 1920, height: 1080 });
@@ -289,22 +498,57 @@ const App: React.FC = () => {
         onFrameReady={handleFrameReady}
       />
 
-      {/* Heart Overlay */}
-      <HeartOverlay
-        chestPosition2d={chestPosition2d}
-        beatScale={beatScale}
-        width={viewport.width}
-        height={viewport.height}
-        cameraFrameWidth={cameraFrameSizeRef.current?.width}
-        cameraFrameHeight={cameraFrameSizeRef.current?.height}
-      />
+      {/* Heart Overlays - one per user with device */}
+      {users
+        .filter(user => user.deviceAddress) // Only show overlays for users with devices
+        .map((user) => {
+          // Show overlay if user has a pose position, otherwise show at center (temporary)
+          const chestPos = user.chestPosition2d || (user.isVisible ? null : null);
+          if (!chestPos) return null; // Don't show overlay if no pose detected yet
+          
+          const beatScale = userBeatScalesRef.current.get(user.userId) || 0.0;
+          return (
+            <HeartOverlay
+              key={user.userId}
+              chestPosition2d={chestPos}
+              beatScale={beatScale}
+              width={viewport.width}
+              height={viewport.height}
+              cameraFrameWidth={cameraFrameSizeRef.current?.width}
+              cameraFrameHeight={cameraFrameSizeRef.current?.height}
+              color={user.color}
+            />
+          );
+        })}
 
-      {/* Heart Rate Display */}
-      <HeartRateDisplay
-        heartRate={heartRate}
-        isConnected={isBLEConnected}
-        deviceName={deviceName}
-      />
+      {/* Heart Rate Displays - one per user with device */}
+      {/* FIX: Show heart rate displays for users with devices, regardless of pose detection */}
+      {users
+        .filter(user => user.deviceAddress) // Only require device, not isVisible
+        .map((user, index) => (
+          <HeartRateDisplay
+            key={user.userId}
+            heartRate={user.heartRate}
+            isConnected={true}
+            deviceName={user.deviceName || undefined}
+            color={user.color}
+            positionOffset={index} // Offset position to avoid overlap
+          />
+        ))}
+
+      {/* Heart Rate Zones Bar Graphs - one per user with device */}
+      {/* FIX: Show heart rate zones for users with devices and heart rate, regardless of pose detection */}
+      {users
+        .filter(user => user.deviceAddress && user.heartRate) // Only require device and heart rate, not isVisible
+        .map((user, index) => (
+          <HeartRateZones
+            key={user.userId}
+            heartRate={user.heartRate}
+            age={30} // Default age, can be made configurable later
+            color={user.color}
+            positionOffset={index} // Offset position to avoid overlap
+          />
+        ))}
 
       {/* Controls */}
       <Controls
@@ -312,19 +556,45 @@ const App: React.FC = () => {
         onCameraStart={() => setIsCameraActive(true)}
         onCameraStop={() => setIsCameraActive(false)}
         onBLEConnect={(address) => {
-          setDeviceAddress(address);
-          setIsBLEConnected(true);
-          const device = discoveredDevices.find(d => d.address === address);
-          if (device) {
-            setDeviceName(device.name);
+          // Add to connecting set for visual feedback
+          setConnectingDevices(prev => new Set(prev).add(address));
+          if (window.electronAPI) {
+            window.electronAPI.bleConnect(address).catch((error: any) => {
+              // Remove from connecting set on error
+              setConnectingDevices(prev => {
+                const next = new Set(prev);
+                next.delete(address);
+                return next;
+              });
+              console.error('[App] Connection error:', error);
+            });
           }
         }}
-        onBLEDisconnect={() => {
-          setDeviceAddress(null);
-          setDeviceName(null);
-          setIsBLEConnected(false);
+        onBLEDisconnect={(address) => {
+          if (window.electronAPI) {
+            window.electronAPI.bleDisconnect(address).catch((error) => {
+              console.error('App: Disconnect error:', error);
+            });
+          }
         }}
-        isBLEConnected={isBLEConnected}
+        onAssignDevice={(userId, deviceAddress) => {
+          const tracker = userTrackerRef.current;
+          if (tracker) {
+            const device = discoveredDevices.find(d => d.address === deviceAddress);
+            if (device) {
+              tracker.assignDevice(userId, deviceAddress, device.name);
+              setUsers(tracker.getUsers());
+            }
+          }
+        }}
+        onUnassignDevice={(userId) => {
+          const tracker = userTrackerRef.current;
+          if (tracker) {
+            tracker.unassignDevice(userId);
+            setUsers(tracker.getUsers());
+          }
+        }}
+        users={users}
         discoveredDevices={discoveredDevices}
         isScanning={isScanning}
         initialScanComplete={initialScanComplete}
@@ -343,6 +613,7 @@ const App: React.FC = () => {
           }
         }}
         isCameraActive={isCameraActive}
+        connectingDevices={connectingDevices}
       />
 
     </div>

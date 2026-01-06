@@ -2,8 +2,10 @@
  * Controls component.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CameraService, CameraDevice } from '../services/camera-service';
+import { User } from '../services/user-tracker';
+import { getColorForDevice } from '../utils/user-colors';
 import '../styles/ecg-theme.css';
 
 interface ControlsProps {
@@ -11,13 +13,16 @@ interface ControlsProps {
   onCameraStart: () => void;
   onCameraStop: () => void;
   onBLEConnect: (address: string) => void;
-  onBLEDisconnect: () => void;
-  isBLEConnected: boolean;
+  onBLEDisconnect: (address?: string) => void;
+  onAssignDevice: (userId: number, deviceAddress: string) => void;
+  onUnassignDevice: (userId: number) => void;
+  users: User[];
   discoveredDevices: Array<{ name: string; address: string }>;
   isScanning: boolean;
   initialScanComplete: boolean;
   onRescan: () => void;
   isCameraActive: boolean;
+  connectingDevices: Set<string>;
 }
 
 export const Controls: React.FC<ControlsProps> = ({
@@ -26,15 +31,20 @@ export const Controls: React.FC<ControlsProps> = ({
   onCameraStop,
   onBLEConnect,
   onBLEDisconnect,
-  isBLEConnected,
+  onAssignDevice,
+  onUnassignDevice,
+  users,
   discoveredDevices,
   isScanning,
   initialScanComplete,
   onRescan,
-  isCameraActive
+  isCameraActive,
+  connectingDevices
 }) => {
   const [selectedCamera, setSelectedCamera] = useState<string>('');
   const [cameras, setCameras] = useState<CameraDevice[]>([]);
+  // Local ref to track pending connections (prevents race conditions with async state updates)
+  const pendingConnectionsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     
@@ -101,28 +111,78 @@ export const Controls: React.FC<ControlsProps> = ({
   };
 
 
-  const handleConnect = (address: string) => {
+  const handleConnect = async (address: string) => {
     if (!address || address.trim() === '') {
       console.error('Controls: Cannot connect - address is empty');
       alert('Cannot connect: Device address is missing. Please try scanning again.');
       return;
     }
     
-    if (window.electronAPI) {
-      window.electronAPI.bleConnect(address).catch((error: Error) => {
-        console.error('Controls: Connection failed:', error);
-        alert(`Connection failed: ${error.message}`);
-      });
+    // Check if already connecting (using both state and ref for immediate blocking)
+    if (connectingDevices.has(address) || pendingConnectionsRef.current.has(address)) {
+      console.log(`Controls: Device ${address} is already connecting`);
+      return; // Already connecting, don't do anything
     }
+    
+    // Check if device is already BLE-connected (has heart rate data)
+    // Assignment != BLE connection - a device can be assigned but not BLE-connected
+    const userWithDevice = users.find(user => user.deviceAddress === address);
+    if (userWithDevice && userWithDevice.heartRate !== undefined && userWithDevice.heartRate !== null) {
+      console.log(`Controls: Device ${address} is already BLE-connected (has heart rate data)`);
+      // Device is already connected and receiving data, don't reconnect
+      return;
+    }
+    
+    // Check if we've reached the maximum number of users (2) - but only if device is not already assigned
+    // If device is assigned but not connected, we should still allow connection
+    if (!userWithDevice) {
+      const usersWithDevices = users.filter(user => user.deviceAddress);
+      if (usersWithDevices.length >= 2) {
+        alert('Maximum of 2 users supported. Please disconnect a user before connecting another device.');
+        return;
+      }
+    }
+    
+    // Add to pending connections immediately (synchronous) to prevent multiple clicks
+    pendingConnectionsRef.current.add(address);
+    
+    // Call onBLEConnect which will add to connectingDevices and start the connection
     onBLEConnect(address);
+    
+    // Note: pendingConnectionsRef will be cleared when connection succeeds/fails via connectingDevices state
+    // But we also clear it when the device is removed from connectingDevices
+  };
+  
+  // Clear pending connections when they're no longer in connectingDevices
+  useEffect(() => {
+    // Remove any addresses from pendingConnectionsRef that are no longer in connectingDevices
+    // This handles the case where connection succeeds or fails
+    pendingConnectionsRef.current.forEach(address => {
+      if (!connectingDevices.has(address)) {
+        pendingConnectionsRef.current.delete(address);
+      }
+    });
+  }, [connectingDevices]);
+
+  const handleDisconnect = (address?: string) => {
+    if (window.electronAPI) {
+      window.electronAPI.bleDisconnect(address);
+    }
+    onBLEDisconnect(address);
   };
 
-  const handleDisconnect = () => {
-    if (window.electronAPI) {
-      window.electronAPI.bleDisconnect();
-    }
-    onBLEDisconnect();
-  };
+  // Get connected device addresses
+  const connectedDevices = users
+    .filter(user => user.deviceAddress)
+    .map(user => user.deviceAddress!);
+  
+  // Get unassigned devices (discovered but not connected or not assigned)
+  const unassignedDevices = discoveredDevices.filter(device => 
+    !connectedDevices.includes(device.address)
+  );
+
+  // Get users without devices
+  const usersWithoutDevices = users.filter(user => !user.deviceAddress && user.isVisible);
 
   return (
     <div
@@ -258,9 +318,9 @@ export const Controls: React.FC<ControlsProps> = ({
       </div>
 
       {/* HR Monitor Controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'center', maxWidth: '600px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <label className="ecg-label" style={{ margin: 0 }}>HR Monitor:</label>
+          <label className="ecg-label" style={{ margin: 0 }}>HR Monitors:</label>
           {initialScanComplete && (
             <button
               onClick={onRescan}
@@ -280,49 +340,184 @@ export const Controls: React.FC<ControlsProps> = ({
             </button>
           )}
         </div>
-        {!isBLEConnected ? (
-          <>
-            {isScanning && (
-              <div className="ecg-status" style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                ● Scanning...
+        
+        {isScanning && (
+          <div className="ecg-status" style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            ● Scanning...
+          </div>
+        )}
+
+        {/* Device Assignment UI */}
+        {users.length > 0 && (
+          <div className="ecg-panel" style={{ padding: '15px', width: '100%', maxHeight: '400px', overflowY: 'auto' }}>
+            <div className="ecg-label" style={{ marginBottom: '10px', fontSize: '11px' }}>
+              User Assignments
+            </div>
+            {users.map((user) => (
+              <div key={user.userId} style={{ marginBottom: '10px', padding: '8px', border: `1px solid ${user.color}`, borderRadius: '3px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '5px' }}>
+                  <div
+                    style={{
+                      width: '16px',
+                      height: '16px',
+                      borderRadius: '2px',
+                      backgroundColor: user.color,
+                      boxShadow: `0 0 8px ${user.color}`
+                    }}
+                  />
+                  <span className="ecg-text" style={{ fontSize: '11px', color: user.color }}>
+                    User {user.userId} {user.isVisible ? '(Visible)' : '(Hidden)'}
+                  </span>
+                  {user.deviceAddress && (
+                    <button
+                      className="ecg-button"
+                      onClick={() => {
+                        // Store device address before unassigning (since unassign clears it)
+                        const deviceAddress = user.deviceAddress!;
+                        // First unassign the device from the user (this clears deviceAddress)
+                        onUnassignDevice(user.userId);
+                        // Then disconnect the BLE device (this will trigger onBLEDisconnected,
+                        // but since deviceAddress is already cleared, it won't find the user to unassign again)
+                        handleDisconnect(deviceAddress);
+                      }}
+                      style={{ 
+                        padding: '4px 8px', 
+                        fontSize: '10px', 
+                        marginLeft: 'auto',
+                        backgroundColor: user.color,
+                        borderColor: user.color,
+                        boxShadow: `0 0 10px ${user.color}`,
+                        textShadow: `0 0 5px ${user.color}`
+                      }}
+                    >
+                      Unassign
+                    </button>
+                  )}
+                </div>
+                {user.deviceAddress ? (
+                  <div style={{ fontSize: '10px', opacity: 0.8, color: user.color }}>
+                    Device: {user.deviceName} ({user.deviceAddress.substring(0, 8)}...)
+                    {user.heartRate && ` - ${user.heartRate} BPM`}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div className="ecg-text" style={{ fontSize: '10px', opacity: 0.7, marginBottom: '4px' }}>
+                      Assign device:
+                    </div>
+                    {unassignedDevices.length > 0 ? (
+                      unassignedDevices.map((device) => {
+                        // Check if we've reached max users before allowing assignment
+                        const currentUsersWithDevices = users.filter(u => u.deviceAddress);
+                        const canAssign = currentUsersWithDevices.length < 2 || user.deviceAddress !== null;
+                        const deviceColor = getColorForDevice(device.address) || 'var(--ecg-green)';
+                        return (
+                          <button
+                            key={device.address}
+                            className="ecg-button"
+                            onClick={async () => {
+                              if (!canAssign) {
+                                alert('Maximum of 2 users supported. Please disconnect a user before assigning a device.');
+                                return;
+                              }
+                              // Check if already connecting (using both state and ref for immediate blocking)
+                              if (connectingDevices.has(device.address) || pendingConnectionsRef.current.has(device.address)) {
+                                return; // Already connecting, don't do anything
+                              }
+                              // Manually assign the device to the specific user first
+                              // This ensures the device is assigned to the correct user before the BLE connected event fires
+                              onAssignDevice(user.userId, device.address);
+                              // Then connect the device (the BLE connected event will see it's already assigned and skip auto-assignment)
+                              await handleConnect(device.address);
+                            }}
+                            disabled={!canAssign || connectingDevices.has(device.address) || pendingConnectionsRef.current.has(device.address)}
+                            style={{ 
+                              padding: '4px 8px', 
+                              fontSize: '10px', 
+                              textAlign: 'left',
+                              opacity: (canAssign && !connectingDevices.has(device.address) && !pendingConnectionsRef.current.has(device.address)) ? 1 : 0.5,
+                              cursor: (canAssign && !connectingDevices.has(device.address) && !pendingConnectionsRef.current.has(device.address)) ? 'pointer' : 'not-allowed',
+                              backgroundColor: (canAssign && !connectingDevices.has(device.address) && !pendingConnectionsRef.current.has(device.address)) ? deviceColor : undefined,
+                              borderColor: deviceColor,
+                              boxShadow: (canAssign && !connectingDevices.has(device.address) && !pendingConnectionsRef.current.has(device.address)) ? `0 0 10px ${deviceColor}` : undefined,
+                              textShadow: (canAssign && !connectingDevices.has(device.address) && !pendingConnectionsRef.current.has(device.address)) ? `0 0 5px ${deviceColor}` : undefined,
+                              position: 'relative'
+                            }}
+                          >
+                            {(connectingDevices.has(device.address) || pendingConnectionsRef.current.has(device.address)) ? (
+                              <>
+                                <i className="fas fa-spinner fa-spin" style={{ marginRight: '4px' }}></i>
+                                Connecting...
+                              </>
+                            ) : (
+                              device.name
+                            )}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="ecg-text" style={{ fontSize: '9px', opacity: 0.6, fontStyle: 'italic' }}>
+                        No unassigned devices
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-            {discoveredDevices.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '10px', width: '100%' }}>
-                {discoveredDevices.map((device) => (
+            ))}
+          </div>
+        )}
+
+        {/* Available Devices */}
+        {unassignedDevices.length > 0 && (
+          <div className="ecg-panel" style={{ padding: '15px', width: '100%' }}>
+            <div className="ecg-label" style={{ marginBottom: '10px', fontSize: '11px' }}>
+              Available Devices
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              {unassignedDevices.map((device) => {
+                const deviceColor = getColorForDevice(device.address) || 'var(--ecg-green)';
+                const isConnecting = connectingDevices.has(device.address) || pendingConnectionsRef.current.has(device.address);
+                return (
                   <button
-                    className="ecg-button"
                     key={device.address}
-                    onClick={() => handleConnect(device.address)}
+                    className="ecg-button"
+                    onClick={() => {
+                      if (!isConnecting) {
+                        handleConnect(device.address);
+                      }
+                    }}
+                    disabled={isConnecting}
                     style={{ 
                       fontSize: '11px',
-                      padding: '6px 12px'
+                      padding: '6px 12px',
+                      textAlign: 'left',
+                      backgroundColor: isConnecting ? undefined : deviceColor,
+                      borderColor: deviceColor,
+                      boxShadow: isConnecting ? undefined : `0 0 10px ${deviceColor}`,
+                      textShadow: isConnecting ? undefined : `0 0 5px ${deviceColor}`,
+                      opacity: isConnecting ? 0.5 : 1,
+                      cursor: isConnecting ? 'not-allowed' : 'pointer',
+                      position: 'relative'
                     }}
                   >
-                    Connect: {device.name}
+                    {isConnecting ? (
+                      <>
+                        <i className="fas fa-spinner fa-spin" style={{ marginRight: '4px' }}></i>
+                        Connecting: {device.name}
+                      </>
+                    ) : (
+                      `Connect: ${device.name}`
+                    )}
                   </button>
-                ))}
-              </div>
-            )}
-            {initialScanComplete && discoveredDevices.length === 0 && (
-              <div className="ecg-text" style={{ fontSize: '10px', opacity: 0.6, fontStyle: 'italic', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                No devices found
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <div className="ecg-status" style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '1px' }}>
-              ● Connected
+                );
+              })}
             </div>
-            <button 
-              className="ecg-button"
-              onClick={handleDisconnect}
-              style={{ padding: '6px 12px', fontSize: '11px' }}
-            >
-              Disconnect
-            </button>
-          </>
+          </div>
+        )}
+
+        {initialScanComplete && discoveredDevices.length === 0 && (
+          <div className="ecg-text" style={{ fontSize: '10px', opacity: 0.6, fontStyle: 'italic', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            No devices found
+          </div>
         )}
       </div>
     </div>
@@ -336,12 +531,12 @@ declare global {
       bleStartScanning: () => Promise<void>;
       bleStopScanning: () => void;
       bleConnect: (address: string) => Promise<boolean>;
-      bleDisconnect: () => Promise<void>;
+      bleDisconnect: (address?: string) => Promise<void>;
       bleGetConnected: () => Promise<boolean>;
       onBLEDeviceDiscovered: (callback: (device: any) => void) => void;
       onBLEConnected: (callback: (address: string, deviceName?: string) => void) => void;
-      onBLEDisconnected: (callback: () => void) => void;
-      onBLEHeartRate: (callback: (heartRate: number) => void) => void;
+      onBLEDisconnected: (callback: (address?: string) => void) => void;
+      onBLEHeartRate: (callback: (heartRate: number, address?: string) => void) => void;
       onBLEError: (callback: (error: Error) => void) => void;
       removeAllListeners: (channel: string) => void;
     };
