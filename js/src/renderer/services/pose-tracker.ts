@@ -1,35 +1,32 @@
 /**
- * MediaPipe pose estimation tracker.
- * Ported from src/pose/mediapipe_tracker.py
+ * MediaPipe Pose Landmarker tracker.
+ * Migrated from deprecated @mediapipe/pose to @mediapipe/tasks-vision PoseLandmarker
+ * Supports multi-person detection (up to 2 people simultaneously).
  */
 
-import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose';
-import type { Results } from '@mediapipe/pose';
-import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
+import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import {
-  MEDIAPIPE_MODEL_COMPLEXITY,
-  MEDIAPIPE_MIN_DETECTION_CONFIDENCE,
-  MEDIAPIPE_MIN_TRACKING_CONFIDENCE,
-  MEDIAPIPE_ENABLE_SEGMENTATION,
-  MEDIAPIPE_SMOOTH_LANDMARKS
+  MEDIAPIPE_POSE_LANDMARKER_MODEL,
+  MEDIAPIPE_NUM_POSES,
+  MEDIAPIPE_MIN_POSE_DETECTION_CONFIDENCE,
+  MEDIAPIPE_MIN_POSE_PRESENCE_CONFIDENCE,
+  MEDIAPIPE_MIN_TRACKING_CONFIDENCE_LANDMARKER
 } from '../utils/config';
 
 export interface PoseResults {
-  poseLandmarks?: any;
-  poseWorldLandmarks?: any;
+  poseLandmarks?: any[];  // Array of arrays: [pose1[33 landmarks], pose2[33 landmarks]]
+  poseWorldLandmarks?: any[];  // Array of arrays
+  timestamp?: number;  // For VIDEO mode
 }
 
 export class PoseTracker {
-  private pose: Pose | null = null;
-  private onResultsCallback?: (results: PoseResults) => void;
-  private pendingRequests: Map<number, (results: PoseResults) => void> = new Map();
-  private requestIdCounter: number = 0;
+  private poseLandmarker: PoseLandmarker | null = null;
   private isInitialized: boolean = false;
   private isProcessing: boolean = false;
   private initializationPromise: Promise<void> | null = null;
+  private lastTimestamp: number = -1;
 
-  constructor(onResults?: (results: PoseResults) => void) {
-    this.onResultsCallback = onResults;
+  constructor() {
     this.initialize();
   }
 
@@ -38,55 +35,42 @@ export class PoseTracker {
       return this.initializationPromise;
     }
 
-    this.initializationPromise = new Promise((resolve, reject) => {
+    this.initializationPromise = (async () => {
       try {
-        // Initialize MediaPipe Pose
-        this.pose = new Pose({
-          locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
-          }
-        });
+        console.log('[PoseTracker] Initializing MediaPipe Pose Landmarker...');
+        
+        // Initialize FilesetResolver for vision tasks
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        );
 
-        // Configure MediaPipe Pose
-        this.pose.setOptions({
-          modelComplexity: MEDIAPIPE_MODEL_COMPLEXITY,
-          minDetectionConfidence: MEDIAPIPE_MIN_DETECTION_CONFIDENCE,
-          minTrackingConfidence: MEDIAPIPE_MIN_TRACKING_CONFIDENCE,
-          enableSegmentation: MEDIAPIPE_ENABLE_SEGMENTATION,
-          smoothLandmarks: MEDIAPIPE_SMOOTH_LANDMARKS
-        });
-
-        // Set results callback - handles both pending requests and general callback
-        this.pose.onResults((results: any) => {
-          const poseResults: PoseResults = {
-            poseLandmarks: results.poseLandmarks,
-            poseWorldLandmarks: results.poseWorldLandmarks
-          };
-
-          // Resolve any pending requests (FIFO - first in, first out)
-          if (this.pendingRequests.size > 0) {
-            const firstRequestId = Array.from(this.pendingRequests.keys())[0];
-            const resolveCallback = this.pendingRequests.get(firstRequestId);
-            if (resolveCallback) {
-              this.pendingRequests.delete(firstRequestId);
-              this.isProcessing = false;
-              resolveCallback(poseResults);
-            }
-          }
-
-          // Also call general callback if set
-          if (this.onResultsCallback) {
-            this.onResultsCallback(poseResults);
-          }
+        // Create PoseLandmarker with multi-person support
+        // Model URLs use versioned paths: /pose_landmarker/{model_name}/float16/1/{model_name}.task
+        const modelName = MEDIAPIPE_POSE_LANDMARKER_MODEL.replace('.task', '');
+        const modelPath = `https://storage.googleapis.com/mediapipe-models/pose_landmarker/${modelName}/float16/1/${MEDIAPIPE_POSE_LANDMARKER_MODEL}`;
+        console.log('[PoseTracker] Loading model from:', modelPath);
+        
+        this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: modelPath,
+            delegate: 'GPU'
+          },
+          numPoses: MEDIAPIPE_NUM_POSES,  // Enable multi-person detection (up to 2)
+          minPoseDetectionConfidence: MEDIAPIPE_MIN_POSE_DETECTION_CONFIDENCE,
+          minPosePresenceConfidence: MEDIAPIPE_MIN_POSE_PRESENCE_CONFIDENCE,
+          minTrackingConfidence: MEDIAPIPE_MIN_TRACKING_CONFIDENCE_LANDMARKER,
+          runningMode: 'VIDEO',  // For webcam streaming
+          outputSegmentationMasks: false
         });
 
         this.isInitialized = true;
-        resolve();
+        console.log('[PoseTracker] MediaPipe Pose Landmarker initialized successfully');
       } catch (error) {
-        console.error('PoseTracker: Initialization error:', error);
-        reject(error);
+        console.error('[PoseTracker] Initialization error:', error);
+        this.isInitialized = false;
+        throw error;
       }
-    });
+    })();
 
     return this.initializationPromise;
   }
@@ -94,110 +78,87 @@ export class PoseTracker {
   /**
    * Process a frame and detect pose landmarks.
    * @param imageData - ImageData from camera
-   * @returns Promise that resolves with results
+   * @param timestamp - Optional timestamp for VIDEO mode (defaults to performance.now())
+   * @returns Promise that resolves with results containing array of poses
    */
-  async process(imageData: ImageData): Promise<PoseResults> {
+  async process(imageData: ImageData, timestamp?: number): Promise<PoseResults> {
     // Wait for initialization
     if (!this.isInitialized) {
       await this.initialize();
     }
 
-    // Skip if already processing (MediaPipe can only handle one frame at a time)
-    if (this.isProcessing || !this.pose) {
-      return Promise.resolve({});
+    // Skip if already processing or not initialized
+    if (this.isProcessing || !this.poseLandmarker) {
+      return { poseLandmarks: [], poseWorldLandmarks: [] };
     }
 
-    return new Promise((resolve) => {
-      try {
-        // Generate unique request ID
-        const requestId = this.requestIdCounter++;
-        
-        // Store resolve callback
-        this.pendingRequests.set(requestId, resolve);
-        this.isProcessing = true;
+    try {
+      this.isProcessing = true;
 
-        // Convert ImageData to HTMLCanvasElement for MediaPipe
-        const canvas = document.createElement('canvas');
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-        const ctx = canvas.getContext('2d');
-        if (ctx && this.pose) {
-          ctx.putImageData(imageData, 0, 0);
-          // Send frame to MediaPipe
-          this.pose.send({ image: canvas });
-        } else {
-          // If canvas context fails, resolve with empty results
-          this.pendingRequests.delete(requestId);
-          this.isProcessing = false;
-          if (!ctx) {
-            console.error('PoseTracker: Failed to get canvas context');
-          }
-          resolve({});
-        }
-      } catch (error) {
-        console.error('PoseTracker: Error processing frame:', error);
-        this.isProcessing = false;
-        resolve({});
+      // Convert ImageData to ImageBitmap for PoseLandmarker
+      const imageBitmap = await createImageBitmap(imageData);
+      
+      // MediaPipe requires timestamps to be strictly monotonically increasing, starting at 1
+      // Use a simple counter to ensure this requirement is met
+      if (this.lastTimestamp === -1) {
+        // First frame - start at 1
+        this.lastTimestamp = 1;
+      } else {
+        // Increment timestamp for each frame
+        this.lastTimestamp = this.lastTimestamp + 1;
       }
-    });
+
+      // Detect poses in the frame using the counter-based timestamp
+      const results = this.poseLandmarker.detectForVideo(imageBitmap, this.lastTimestamp);
+      
+      // Clean up ImageBitmap
+      imageBitmap.close();
+
+      // Convert results to our PoseResults format
+      // results.landmarks is an array of arrays: [pose1[33 landmarks], pose2[33 landmarks]]
+      return {
+        poseLandmarks: results.landmarks || [],
+        poseWorldLandmarks: results.worldLandmarks || [],
+        timestamp: this.lastTimestamp
+      };
+    } catch (error) {
+      console.error('[PoseTracker] Error processing frame:', error);
+      return { poseLandmarks: [], poseWorldLandmarks: [] };
+    } finally {
+      this.isProcessing = false;
+    }
   }
 
   /**
    * Get normalized landmarks from results.
+   * Returns array of pose landmark arrays (for multi-person support).
    */
-  getNormalizedLandmarks(results: PoseResults) {
+  getNormalizedLandmarks(results: PoseResults): any[] | null {
     return results.poseLandmarks || null;
   }
 
   /**
    * Get world landmarks from results.
+   * Returns array of pose world landmark arrays (for multi-person support).
    */
-  getWorldLandmarks(results: PoseResults) {
+  getWorldLandmarks(results: PoseResults): any[] | null {
     return results.poseWorldLandmarks || null;
-  }
-
-  /**
-   * Draw pose landmarks on a canvas.
-   */
-  drawLandmarks(
-    canvas: HTMLCanvasElement,
-    results: PoseResults
-  ): void {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Clear canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (results.poseLandmarks) {
-      // Draw connections
-      drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, {
-        color: '#00FF00',
-        lineWidth: 2
-      });
-
-      // Draw landmarks
-      drawLandmarks(ctx, results.poseLandmarks, {
-        color: '#00FF00',
-        radius: 2
-      });
-    }
   }
 
   /**
    * Close MediaPipe pose estimation.
    */
   close(): void {
-    if (this.pose) {
+    if (this.poseLandmarker) {
       try {
-        this.pose.close();
+        // PoseLandmarker doesn't have a close method, just clear the reference
+        this.poseLandmarker = null;
+        this.isInitialized = false;
+        this.isProcessing = false;
+        console.log('[PoseTracker] Closed');
       } catch (error) {
-        console.error('PoseTracker: Error closing:', error);
+        console.error('[PoseTracker] Error closing:', error);
       }
-      this.pose = null;
-      this.isInitialized = false;
-      this.isProcessing = false;
     }
   }
 }
-

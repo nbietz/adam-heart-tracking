@@ -29,12 +29,20 @@ export const HEART_DIFFUSE_TEXTURE = `${HEART_TEXTURE_DIR}/heart_diffuse.jpg`;
 export const HEART_DIFFUSE_TEXTURE_2 = `${HEART_TEXTURE_DIR}/heart_diffuse_2.jpg`;
 export const HEART_DISPLACEMENT_MAP = `${HEART_TEXTURE_DIR}/heart_displacement_map.jpg`;
 
-// MediaPipe configuration
+// MediaPipe configuration (legacy - deprecated, kept for reference)
 export const MEDIAPIPE_MODEL_COMPLEXITY = 1; // 0, 1, or 2
 export const MEDIAPIPE_MIN_DETECTION_CONFIDENCE = 0.5;
 export const MEDIAPIPE_MIN_TRACKING_CONFIDENCE = 0.5;
 export const MEDIAPIPE_ENABLE_SEGMENTATION = false;
 export const MEDIAPIPE_SMOOTH_LANDMARKS = true;
+
+// MediaPipe Pose Landmarker configuration (new API)
+// Model options: 'pose_landmarker_lite.task' (fastest), 'pose_landmarker_full.task' (balanced), 'pose_landmarker_heavy.task' (most accurate)
+export const MEDIAPIPE_POSE_LANDMARKER_MODEL = 'pose_landmarker_full.task'; // Using 'full' as default (heavy may not be available)
+export const MEDIAPIPE_NUM_POSES = 2; // Maximum number of people to detect per frame
+export const MEDIAPIPE_MIN_POSE_DETECTION_CONFIDENCE = 0.5;
+export const MEDIAPIPE_MIN_POSE_PRESENCE_CONFIDENCE = 0.5;
+export const MEDIAPIPE_MIN_TRACKING_CONFIDENCE_LANDMARKER = 0.5;
 
 // Video configuration
 export const CAMERA_INDEX = 0; // Default camera index
