@@ -66,9 +66,11 @@ export const HeartOverlay: React.FC<HeartOverlayProps> = ({
   }
   
   // Calculate animated size based on beat scale
-  // beatScale is 0.0-0.3, convert to 1.0-1.2 for animation
-  const baseSize = 80; // Base font size in pixels
-  const animatedSize = baseSize * (1.0 + beatScale * 0.2);
+  // beatScale is 0.0-0.3, convert to 1.0-1.3 for animation (amplified)
+  // Triple the base size: 80 * 3 = 240
+  const baseSize = 240; // Base font size in pixels (tripled from 80)
+  // Amplified heartbeat: increased multiplier from 0.2 to 0.6 for more visible size changes
+  const animatedSize = baseSize * (1.0 + beatScale * 0.6);
   
   // Convert hex color to rgba for glow effect
   const hexToRgba = (hex: string, alpha: number): string => {

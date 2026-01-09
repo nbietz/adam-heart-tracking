@@ -62,6 +62,6 @@ export const POLAR_H10_CHARACTERISTIC_UUID = '00002a37-0000-1000-8000-00805f9b34
 export const HEART_RATE_SCAN_TIMEOUT = 10.0; // seconds
 
 // Animation configuration
-export const HEART_BEAT_SCALE_AMPLITUDE = 0.3; // 30% scale change for heartbeat
+export const HEART_BEAT_SCALE_AMPLITUDE = 0.5; // 50% scale change for heartbeat (increased from 0.3 for more visible effect)
 export const ANIMATION_SMOOTHING = 0.1; // Smoothing factor for BPM changes
 
