@@ -244,13 +244,15 @@ export class ChestTracker {
     const shoulderWidth = Math.abs(shoulderDiff[0] * frameWidth);
     chestX = chestX - (shoulderWidth * 0.15);  // Move left by 15% of shoulder width
 
-    // Apply minimal smoothing on both X and Y for direct tracking
+    // Apply smoothing on both X and Y to reduce jitter
     let chestPos2d = vec3.fromValues(chestX, chestY, 0);
     if (this.lastPosition2d) {
       const smoothed = vec3.create();
-      const smoothingFactor = 0.1; // Minimal smoothing for both X and Y - direct tracking
+      // Increased smoothing factor from 0.1 to 0.3 for smoother movement
+      // This reduces jitter while still being responsive
+      const smoothingFactor = 0.3;
       
-      // Smooth both coordinates with minimal lag
+      // Smooth both coordinates
       smoothed[0] = this.lastPosition2d[0] * smoothingFactor + chestX * (1.0 - smoothingFactor);
       smoothed[1] = this.lastPosition2d[1] * smoothingFactor + chestY * (1.0 - smoothingFactor);
       smoothed[2] = 0;

@@ -61,9 +61,11 @@ const App: React.FC = () => {
 
   // Animation state per user
   const userBeatScalesRef = useRef<Map<number, number>>(new Map());
+  const userSmoothedBeatScalesRef = useRef<Map<number, number>>(new Map()); // Smoothed beat scales
   const userBPMRefs = useRef<Map<number, { current: number | null; target: number | null; pulseStart: number | null }>>(new Map());
   const startTimeRef = useRef<number>(Date.now());
   const pulseDuration = 0.3; // seconds
+  const BEAT_SCALE_SMOOTHING = 0.15; // Smoothing factor for beat scale changes (lower = smoother)
 
   // Initialize services
   useEffect(() => {
@@ -263,12 +265,13 @@ const App: React.FC = () => {
         return;
       }
 
-      // Update beat scales for all users
+        // Update beat scales for all users
       const currentUsers = tracker.getUsers();
       for (const user of currentUsers) {
         const bpmState = userBPMRefs.current.get(user.userId);
         if (!bpmState) {
           userBeatScalesRef.current.set(user.userId, 0.0);
+          userSmoothedBeatScalesRef.current.set(user.userId, 0.0);
           continue;
         }
 
@@ -325,7 +328,13 @@ const App: React.FC = () => {
           }
         }
 
+        // Store raw beat scale
         userBeatScalesRef.current.set(user.userId, beatScale);
+        
+        // Apply smoothing to beat scale for smooth size transitions
+        const lastSmoothed = userSmoothedBeatScalesRef.current.get(user.userId) || 0.0;
+        const smoothedBeatScale = lastSmoothed * (1.0 - BEAT_SCALE_SMOOTHING) + beatScale * BEAT_SCALE_SMOOTHING;
+        userSmoothedBeatScalesRef.current.set(user.userId, smoothedBeatScale);
       }
 
       // Trigger re-render by updating users (which will cause components to re-render)
@@ -384,53 +393,140 @@ const App: React.FC = () => {
         for (const user of usersWithDevices) {
           tracker.updateChestPosition(user.userId, null);
         }
-      } else if (personCount === 1) {
-        // One person detected - assign to first user without pose or first user
-        const pose = results.poseLandmarks![0]; // First pose (array of 33 landmarks)
-        const targetUser = usersWithDevices.find(u => !u.chestPosition2d) || usersWithDevices[0];
+      } else {
+        // Calculate chest positions for all detected poses
+        const poseChestPositions: Array<{ pose: any; chestPos2d: { x: number; y: number } | null; centerX: number }> = [];
         
-        const chestPos2d = targetUser.chestTracker.getChestPosition2d(
-          pose as any,
-          imageData.width,
-          imageData.height,
-          true
-        );
-        
-        if (chestPos2d) {
-          detectedPoses.push({ user: targetUser, chestPos2d: { x: chestPos2d[0], y: chestPos2d[1] } });
-        }
-      } else if (personCount >= 2) {
-        // Two or more people detected - assign to users based on x-position
-        // Sort poses by x-position (left to right)
-        const sortedPoses = results.poseLandmarks!
-          .map((pose, index) => ({
-            pose,
-            centerX: calculatePoseCenterX(pose),
-            index
-          }))
-          .sort((a, b) => a.centerX - b.centerX);  // Sort left to right
-        
-        // Assign leftmost pose to user 1, rightmost to user 2
-        // Only process poses for users that actually exist
-        for (let i = 0; i < Math.min(usersWithDevices.length, sortedPoses.length); i++) {
-          const { pose } = sortedPoses[i];
-          const targetUser = usersWithDevices[i];
-          
-          // Safety check: ensure user exists and has chestTracker
-          if (!targetUser || !targetUser.chestTracker) {
-            console.warn(`[App] User ${i} not available for pose assignment`);
-            continue;
-          }
-          
-          const chestPos2d = targetUser.chestTracker.getChestPosition2d(
+        for (const pose of results.poseLandmarks!) {
+          // Try each user's chest tracker to get position
+          // We'll use the first user's tracker as a temporary measure to calculate position
+          const tempChestPos2d = usersWithDevices[0]?.chestTracker.getChestPosition2d(
             pose as any,
             imageData.width,
             imageData.height,
             true
           );
           
+          if (tempChestPos2d) {
+            poseChestPositions.push({
+              pose,
+              chestPos2d: { x: tempChestPos2d[0], y: tempChestPos2d[1] },
+              centerX: calculatePoseCenterX(pose)
+            });
+          }
+        }
+
+        // Assign poses to users using distance-based matching
+        // This prevents hearts from jumping between bodies
+        const assignments: Array<{ user: User; poseIndex: number; distance: number }> = [];
+        const usedPoseIndices = new Set<number>();
+        const usedUserIds = new Set<number>();
+
+        // First pass: assign poses to users based on distance to last known position
+        // Use a greedy algorithm: for each user, find the closest unassigned pose
+        for (const user of usersWithDevices) {
+          if (!user.chestTracker) continue;
+          
+          let bestMatch: { poseIndex: number; distance: number } | null = null;
+          
+          for (let i = 0; i < poseChestPositions.length; i++) {
+            if (usedPoseIndices.has(i)) continue;
+            
+            const poseData = poseChestPositions[i];
+            if (!poseData.chestPos2d) continue;
+            
+            // Calculate distance using user's own tracker for accuracy
+            const userChestPos2d = user.chestTracker.getChestPosition2d(
+              poseData.pose as any,
+              imageData.width,
+              imageData.height,
+              true
+            );
+            
+            if (!userChestPos2d) continue;
+            
+            // Calculate distance to user's last known position
+            let distance: number;
+            if (user.chestPosition2d) {
+              const dx = userChestPos2d[0] - user.chestPosition2d.x;
+              const dy = userChestPos2d[1] - user.chestPosition2d.y;
+              distance = Math.sqrt(dx * dx + dy * dy);
+              
+              // Maximum distance threshold: if pose is too far from last known position,
+              // don't assign it (prevents hearts from jumping to distant poses)
+              // Threshold is 30% of frame width (reasonable movement distance)
+              const maxDistance = imageData.width * 0.3;
+              if (distance > maxDistance) {
+                continue; // Skip this pose - too far away
+              }
+            } else {
+              // If user has no last position, assign based on order (first user gets first pose)
+              // Use a small distance to prioritize users without positions
+              distance = i * 100; // Prefer earlier poses for users without positions
+            }
+            
+            if (bestMatch === null || distance < bestMatch.distance) {
+              bestMatch = { poseIndex: i, distance };
+            }
+          }
+          
+          if (bestMatch) {
+            assignments.push({ user, poseIndex: bestMatch.poseIndex, distance: bestMatch.distance });
+            usedPoseIndices.add(bestMatch.poseIndex);
+            usedUserIds.add(user.userId);
+          }
+        }
+
+        // Second pass: assign remaining poses to remaining users (if any)
+        // Sort by x-position for remaining assignments
+        const remainingPoses = poseChestPositions
+          .map((p, i) => ({ ...p, index: i }))
+          .filter((p, i) => !usedPoseIndices.has(i))
+          .sort((a, b) => a.centerX - b.centerX);
+        
+        const remainingUsers = usersWithDevices.filter(u => !usedUserIds.has(u.userId));
+        
+        for (let i = 0; i < Math.min(remainingPoses.length, remainingUsers.length); i++) {
+          const poseData = remainingPoses[i];
+          const user = remainingUsers[i];
+          
+          if (!user.chestTracker) continue;
+          
+          // Recalculate with user's own tracker
+          const chestPos2d = user.chestTracker.getChestPosition2d(
+            poseData.pose as any,
+            imageData.width,
+            imageData.height,
+            true
+          );
+          
           if (chestPos2d) {
-            detectedPoses.push({ user: targetUser, chestPos2d: { x: chestPos2d[0], y: chestPos2d[1] } });
+            assignments.push({
+              user,
+              poseIndex: poseData.index,
+              distance: 0
+            });
+          }
+        }
+
+        // Process assignments and calculate final chest positions
+        for (const assignment of assignments) {
+          const poseData = poseChestPositions[assignment.poseIndex];
+          if (!poseData || !poseData.chestPos2d) continue;
+          
+          // Recalculate with user's own tracker for consistency
+          const chestPos2d = assignment.user.chestTracker.getChestPosition2d(
+            poseData.pose as any,
+            imageData.width,
+            imageData.height,
+            true
+          );
+          
+          if (chestPos2d) {
+            detectedPoses.push({ 
+              user: assignment.user, 
+              chestPos2d: { x: chestPos2d[0], y: chestPos2d[1] } 
+            });
           }
         }
       }
@@ -506,7 +602,8 @@ const App: React.FC = () => {
           const chestPos = user.chestPosition2d || (user.isVisible ? null : null);
           if (!chestPos) return null; // Don't show overlay if no pose detected yet
           
-          const beatScale = userBeatScalesRef.current.get(user.userId) || 0.0;
+          // Use smoothed beat scale for smooth animation
+          const beatScale = userSmoothedBeatScalesRef.current.get(user.userId) || 0.0;
           return (
             <HeartOverlay
               key={user.userId}
