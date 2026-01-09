@@ -228,36 +228,91 @@ export class BLEHandler extends EventEmitter {
       // Stop continuous scanning but keep one-time scanning for connection
       const wasScanning = this.isScanning;
       this.stopScanning();
+      
+      // Wait for scanning to fully stop before starting a new scan
+      // This prevents race conditions when connecting multiple devices
+      // Longer delay when connecting second device to ensure first connection is stable
+      const delay = this.connections.size > 0 ? 500 : 200;
+      await new Promise(resolve => setTimeout(resolve, delay));
 
-      // Find peripheral - try scanning if not already found
+      // Find peripheral - scan for it
       let peripheral: any = null;
       
       console.log(`[BLE] Scanning for device ${address}...`);
       
-      peripheral = await new Promise<any>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          noble.removeListener('discover', onDiscover);
-          noble.stopScanning();
-          reject(new Error(`Device ${address} not found within 10 seconds`));
-        }, 10000);
+      // Check if noble is ready before starting scan
+      if (this.nobleState !== 'poweredOn') {
+        throw new Error(`BLE not powered on (state: ${this.nobleState})`);
+      }
+      
+      // Ensure noble is not already scanning before starting a new scan
+      // This is important when connecting a second device
+      let scanAttempts = 0;
+      const maxScanAttempts = 3;
+      
+      while (!peripheral && scanAttempts < maxScanAttempts) {
+        scanAttempts++;
+        try {
+          peripheral = await new Promise<any>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              noble.removeListener('discover', onDiscover);
+              try {
+                noble.stopScanning();
+              } catch (e) {
+                // Ignore errors when stopping scan
+              }
+              reject(new Error(`Device ${address} not found within 10 seconds`));
+            }, 10000);
 
-        const onDiscover = (p: any) => {
-          const pAddress = p.address || p.id || '';
-          // Normalize both addresses for comparison
-          const normalizedPAddress = pAddress.toLowerCase().trim();
-          const normalizedTargetAddress = address.toLowerCase().trim();
-          if (pAddress && normalizedPAddress === normalizedTargetAddress) {
-            console.log(`[BLE] Found target device: ${p.advertisement.localName || 'Unknown'} (${pAddress})`);
-            clearTimeout(timeout);
-            noble.removeListener('discover', onDiscover);
-            noble.stopScanning();
-            resolve(p);
+            const onDiscover = (p: any) => {
+              const pAddress = p.address || p.id || '';
+              // Normalize both addresses for comparison
+              const normalizedPAddress = pAddress.toLowerCase().trim();
+              const normalizedTargetAddress = address.toLowerCase().trim();
+              if (pAddress && normalizedPAddress === normalizedTargetAddress) {
+                console.log(`[BLE] Found target device: ${p.advertisement.localName || 'Unknown'} (${pAddress})`);
+                clearTimeout(timeout);
+                noble.removeListener('discover', onDiscover);
+                try {
+                  noble.stopScanning();
+                } catch (e) {
+                  // Ignore errors when stopping scan
+                }
+                resolve(p);
+              }
+            };
+
+            noble.on('discover', onDiscover);
+            
+            // Start scanning with error handling
+            try {
+              noble.startScanning([], true);
+            } catch (error: any) {
+              noble.removeListener('discover', onDiscover);
+              clearTimeout(timeout);
+              reject(new Error(`Failed to start scanning: ${error.message || error}`));
+            }
+          });
+        } catch (scanError: any) {
+          console.log(`[BLE] Scan attempt ${scanAttempts} failed: ${scanError.message}`);
+          if (scanAttempts < maxScanAttempts) {
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, 500));
+            // Ensure scanning is stopped before retry
+            try {
+              noble.stopScanning();
+            } catch (e) {
+              // Ignore errors
+            }
+          } else {
+            throw new Error(`Failed to scan for device after ${maxScanAttempts} attempts: ${scanError.message}`);
           }
-        };
-
-        noble.on('discover', onDiscover);
-        noble.startScanning([], true);
-      });
+        }
+      }
+      
+      if (!peripheral) {
+        throw new Error(`Device ${address} not found after ${maxScanAttempts} scan attempts`);
+      }
 
       // Connect to peripheral with retry logic
       console.log('[BLE] Connecting to peripheral...');
