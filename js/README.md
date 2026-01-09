@@ -64,3 +64,4 @@ This creates a macOS universal binary (Intel + Apple Silicon) in the `dist/` dir
 - Camera permissions may be required on macOS
 - BLE permissions may be required on macOS
 
+

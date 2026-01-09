@@ -66,3 +66,4 @@ export function getDeviceColors(): Map<string, string> {
   return new Map(DEVICE_COLORS);
 }
 
+

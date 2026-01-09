@@ -68,3 +68,4 @@ adam-heart-tracking/
 └── monitor-errors.sh      # Helper script to monitor errors
 ```
 
+
